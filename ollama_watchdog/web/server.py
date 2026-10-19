@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qsl, urlparse
 
+from .aliases import ClientAliases, InvalidAlias
 from .service import BadRequest, DashboardService, PeriodQuery
 
 log = logging.getLogger(__name__)
@@ -37,19 +38,26 @@ class BasicAuth:
 
 
 class ApiRouter:
-    def __init__(self, service: DashboardService) -> None:
-        self._routes: dict[str, Callable[[dict[str, str]], object]] = {
+    def __init__(self, service: DashboardService, aliases: ClientAliases) -> None:
+        self._get: dict[str, Callable[[dict[str, str]], object]] = {
             "/api/report": lambda params: service.report(PeriodQuery.from_params(params)),
             "/api/days": lambda params: service.days(),
             "/api/status": lambda params: service.status(),
+            "/api/aliases": lambda params: aliases.snapshot(),
             "/api/health": lambda params: {"ok": True},
         }
+        self._post: dict[str, Callable[[dict], object]] = {
+            "/api/aliases": lambda body: aliases.set(str(body.get("ip", "")), str(body.get("name", ""))),
+        }
 
-    def handles(self, path: str) -> bool:
-        return path in self._routes
+    def handles(self, method: str, path: str) -> bool:
+        return path in self._routes(method)
 
-    def dispatch(self, path: str, params: dict[str, str]) -> object:
-        return self._routes[path](params)
+    def dispatch(self, method: str, path: str, data: dict) -> object:
+        return self._routes(method)[path](data)
+
+    def _routes(self, method: str) -> dict[str, Callable[[dict], object]]:
+        return self._post if method == "POST" else self._get
 
 
 class DashboardServer(ThreadingHTTPServer):
@@ -64,15 +72,42 @@ class DashboardServer(ThreadingHTTPServer):
 class DashboardRequestHandler(BaseHTTPRequestHandler):
     server: DashboardServer
     server_version = "ollama-watchdog"
+    MAX_BODY_BYTES = 4096
 
     def do_GET(self) -> None:  # noqa: N802 — имя задано http.server
         url = urlparse(self.path)
         if url.path != "/api/health" and not self._authorized():
             return
-        if self.server.router.handles(url.path):
-            self._serve_api(url.path, dict(parse_qsl(url.query)))
+        if self.server.router.handles("GET", url.path):
+            self._serve_api("GET", url.path, dict(parse_qsl(url.query)))
         else:
             self._serve_static(url.path)
+
+    def do_POST(self) -> None:  # noqa: N802 — имя задано http.server
+        url = urlparse(self.path)
+        if not self._authorized():
+            return
+        if not self.server.router.handles("POST", url.path):
+            self._send(HTTPStatus.NOT_FOUND, b"not found", "text/plain; charset=utf-8")
+            return
+        body = self._read_json()
+        if body is None:
+            self._send_json(HTTPStatus.BAD_REQUEST, {"error": "ожидается JSON-объект (Content-Type: application/json)"})
+            return
+        self._serve_api("POST", url.path, body)
+
+    def _read_json(self) -> dict | None:
+        """Только application/json: такой запрос с чужого сайта браузер не отправит без CORS."""
+        if self.headers.get_content_type() != "application/json":
+            return None
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if not 0 < length <= self.MAX_BODY_BYTES:
+                return None
+            body = json.loads(self.rfile.read(length))
+        except ValueError:
+            return None
+        return body if isinstance(body, dict) else None
 
     def _authorized(self) -> bool:
         auth = self.server.auth
@@ -84,15 +119,18 @@ class DashboardRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         return False
 
-    def _serve_api(self, path: str, params: dict[str, str]) -> None:
+    def _serve_api(self, method: str, path: str, data: dict) -> None:
         try:
-            payload = self.server.router.dispatch(path, params)
+            payload = self.server.router.dispatch(method, path, data)
             status = HTTPStatus.OK
-        except BadRequest as error:
+        except (BadRequest, InvalidAlias) as error:
             payload, status = {"error": str(error)}, HTTPStatus.BAD_REQUEST
         except Exception:
-            log.exception("ошибка обработки %s", path)
+            log.exception("ошибка обработки %s %s", method, path)
             payload, status = {"error": "внутренняя ошибка сервера"}, HTTPStatus.INTERNAL_SERVER_ERROR
+        self._send_json(status, payload)
+
+    def _send_json(self, status: HTTPStatus, payload: object) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         self._send(status, body, "application/json; charset=utf-8", cache="no-store")
 
