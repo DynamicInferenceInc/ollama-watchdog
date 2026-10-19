@@ -96,11 +96,58 @@ class ApiClient {
     return this.#get("api/status");
   }
 
+  async aliases() {
+    return this.#get("api/aliases");
+  }
+
+  async saveAlias(ip, name) {
+    return this.#request("api/aliases", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ip, name }),
+    });
+  }
+
   async #get(url) {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    return this.#request(url, {});
+  }
+
+  async #request(url, options) {
+    const response = await fetch(url, { ...options, headers: { Accept: "application/json", ...options.headers } });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
     return payload;
+  }
+}
+
+/** Понятные имена клиентов вместо IP; сам IP виден в подсказке над именем. */
+class ClientNames {
+  constructor() {
+    this.aliases = {};
+    this.fixed = new Set();
+  }
+
+  update({ aliases, fixed }) {
+    this.aliases = aliases;
+    this.fixed = new Set(fixed);
+  }
+
+  name(ip) {
+    return this.aliases[ip] ?? ip;
+  }
+
+  alias(ip) {
+    return this.aliases[ip] ?? "";
+  }
+
+  isFixed(ip) {
+    return this.fixed.has(ip);
+  }
+
+  label(ip) {
+    const alias = this.aliases[ip];
+    if (!alias) return `<span class="mono">${escapeHtml(ip)}</span>`;
+    return `<span class="client-alias" data-client-ip="${escapeHtml(ip)}">${escapeHtml(alias)}</span>`;
   }
 }
 
@@ -155,6 +202,18 @@ class Tooltip {
     if (top + rect.height > innerHeight - 8) top = event.clientY - rect.height - 16;
     this.element.style.left = `${Math.max(8, left)}px`;
     this.element.style.top = `${Math.max(8, top)}px`;
+  }
+
+  /** Над элементом по центру, а если сверху не помещается — под ним. */
+  showAbove(content, target) {
+    this.element.innerHTML = content;
+    this.element.hidden = false;
+    const anchor = target.getBoundingClientRect();
+    const rect = this.element.getBoundingClientRect();
+    const left = Math.min(Math.max(8, anchor.left + anchor.width / 2 - rect.width / 2), window.innerWidth - rect.width - 8);
+    const top = anchor.top - rect.height - 8 >= 8 ? anchor.top - rect.height - 8 : anchor.bottom + 8;
+    this.element.style.left = `${left}px`;
+    this.element.style.top = `${top}px`;
   }
 
   hide() {
@@ -440,9 +499,8 @@ class Delta {
 }
 
 class KpiPanel {
-  constructor({ container, caption }) {
-    this.container = container;
-    this.caption = caption;
+  constructor({ container, caption, names }) {
+    Object.assign(this, { container, caption, names });
   }
 
   render(report) {
@@ -496,7 +554,7 @@ class KpiPanel {
         color: "#34d399",
         value: Format.number(report.active_clients),
         delta: Delta.badge(report.active_clients, previous?.active_clients, 0),
-        sub: topClient ? `чаще всех: ${escapeHtml(topClient.client_ip)}` : "—",
+        sub: topClient ? `чаще всех: ${this.names.label(topClient.client_ip)}` : "—",
       },
     ];
     this.container.innerHTML = cards
@@ -657,13 +715,20 @@ class LoadsTable {
 }
 
 class ClientsTable {
-  constructor({ container, colors }) {
-    Object.assign(this, { container, colors });
+  constructor({ container, colors, names, onRename }) {
+    Object.assign(this, { container, colors, names, onRename });
+    this.editing = null;
+    this.container.addEventListener("click", (event) => {
+      const button = event.target.closest("button[data-edit-ip]");
+      if (button) this.#startEditing(button.dataset.editIp);
+    });
   }
 
   render(report) {
+    this.report = report;
+    if (this.editing) return;
     const rows = report.clients.slice(0, 15).map((client) => `<tr>
-      <td><div class="mono">${escapeHtml(client.client_ip)}</div>
+      <td><div class="client-cell" data-ip="${escapeHtml(client.client_ip)}">${this.names.label(client.client_ip)}${this.#editButton(client.client_ip)}</div>
         <div class="faint">служебных: ${Format.compact(client.service_requests)}</div></td>
       <td class="num"><strong>${Format.number(client.inference_requests)}</strong></td>
       <td class="num ${client.errors ? "text-bad" : "faint"}">${Format.number(client.errors)}</td>
@@ -674,6 +739,52 @@ class ClientsTable {
     </tr>`);
     SimpleTable.render(this.container,
       [["Клиент"], ["К моделям", true], ["Ошибок", true], ["Чаще всего"], ["Был", true]], rows, "Клиентов нет");
+  }
+
+  #editButton(ip) {
+    if (this.names.isFixed(ip)) return "";
+    const title = this.names.alias(ip) ? "Изменить имя" : "Задать имя";
+    return `<button class="client-edit" data-edit-ip="${escapeHtml(ip)}" title="${title}" aria-label="${title}">
+      <svg viewBox="0 0 24 24"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg></button>`;
+  }
+
+  #startEditing(ip) {
+    const cell = [...this.container.querySelectorAll(".client-cell")].find((element) => element.dataset.ip === ip);
+    if (!cell) return;
+    this.editing = ip;
+    cell.innerHTML = `<input class="client-input" maxlength="64" placeholder="${escapeHtml(ip)}" aria-label="Имя для ${escapeHtml(ip)}">`;
+    const input = cell.querySelector("input");
+    input.value = this.names.alias(ip);
+    input.focus();
+    input.select();
+
+    let done = false;
+    const finish = async (save) => {
+      if (done) return;
+      done = true;
+      if (save && input.value.trim() !== this.names.alias(ip)) {
+        try {
+          await this.onRename(ip, input.value);
+        } catch (error) {
+          if (document.activeElement === input) {
+            done = false;
+            input.classList.add("is-invalid");
+            input.title = error.message;
+            return;
+          }
+        }
+      }
+      this.editing = null;
+      this.render(this.report);
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") finish(true);
+      if (event.key === "Escape") {
+        event.stopPropagation();
+        finish(false);
+      }
+    });
+    input.addEventListener("blur", () => finish(true));
   }
 }
 
@@ -697,8 +808,8 @@ class EndpointsTable {
 }
 
 class RecentRequestsTable {
-  constructor({ container, hint, colors }) {
-    Object.assign(this, { container, hint, colors });
+  constructor({ container, hint, colors, names }) {
+    Object.assign(this, { container, hint, colors, names });
   }
 
   render(report, focus) {
@@ -713,7 +824,7 @@ class RecentRequestsTable {
         <td><span class="badge badge--${statusTone}">${request.status}</span></td>
         <td><div class="model-name">${this.colors.swatch(request.model)}<span class="model-name__text">${escapeHtml(request.model)}</span></div></td>
         <td><span class="chip">${escapeHtml(request.endpoint)}</span></td>
-        <td class="mono muted">${escapeHtml(request.client_ip)}</td>
+        <td class="muted nowrap">${this.names.label(request.client_ip)}</td>
         <td class="num">${Format.duration(request.duration)}</td>
       </tr>`;
     });
@@ -723,8 +834,8 @@ class RecentRequestsTable {
 }
 
 class ProblemsPanel {
-  constructor(container) {
-    this.container = container;
+  constructor({ container, names }) {
+    Object.assign(this, { container, names });
   }
 
   render(report) {
@@ -735,7 +846,7 @@ class ProblemsPanel {
       return;
     }
     const failedHtml = failed.map((f) => `<div class="problem ${f.status >= 500 ? "problem--bad" : ""}">
-      <div class="problem__head"><span>${Format.dateTime(f.timestamp)} · ${escapeHtml(f.client_ip)}</span><span>${Format.duration(f.duration)}</span></div>
+      <div class="problem__head"><span>${Format.dateTime(f.timestamp)} · ${this.names.label(f.client_ip)}</span><span>${Format.duration(f.duration)}</span></div>
       <div class="problem__text"><strong>${f.status}</strong> ${escapeHtml(f.endpoint)} → ${escapeHtml(f.model)}</div></div>`).join("");
     const incidentsHtml = incidents.map((i) => `<div class="problem ${i.level === "ERROR" ? "problem--bad" : ""}">
       <div class="problem__head"><span>${i.level} · ×${i.count}</span><span>последний раз ${Format.dateTime(i.last)}</span></div>
@@ -763,6 +874,10 @@ class ProblemsPanel {
 
 /** Превращает цифры отчёта в короткие выводы: что важно заметить. */
 class InsightsBuilder {
+  constructor(names) {
+    this.names = names;
+  }
+
   build(report) {
     if (!report.inference_requests) {
       return [{ level: "info", title: "Запросов к моделям нет", text: "За выбранный период ollama не получала запросов на генерацию или эмбеддинги." }];
@@ -892,15 +1007,15 @@ class InsightsBuilder {
     return [{
       level: "info",
       title: `${Format.percent(report.service_requests, report.total_requests)} трафика — служебные запросы`,
-      text: `В основном опросы /api/ps и проверки доступности; больше всех — ${poller.client_ip} (${Format.compact(poller.service_requests)}). На нагрузку на GPU это не влияет.`,
+      text: `В основном опросы /api/ps и проверки доступности; больше всех — ${this.names.name(poller.client_ip)} (${Format.compact(poller.service_requests)}). На нагрузку на GPU это не влияет.`,
     }];
   }
 }
 
 class InsightsPanel {
-  constructor(container) {
+  constructor({ container, names }) {
     this.container = container;
-    this.builder = new InsightsBuilder();
+    this.builder = new InsightsBuilder(names);
   }
 
   render(report) {
@@ -1020,6 +1135,7 @@ class Dashboard {
     this.api = new ApiClient();
     this.colors = new ColorRegistry();
     this.tooltip = new Tooltip(byId("tooltip"));
+    this.names = new ClientNames();
     this.query = Dashboard.#queryFromHash();
     this.focus = null;
     this.report = null;
@@ -1028,7 +1144,7 @@ class Dashboard {
     const onFocus = (model) => this.setFocus(model);
     this.period = new PeriodControls({ buttons: byId("period-buttons"), dateInput: byId("date-input"), onChange: (q) => this.setQuery(q) });
     this.statusBar = new StatusBar({ pills: byId("status-pills"), subtitle: byId("subtitle"), footer: byId("footer"), notices: byId("notices") });
-    this.kpis = new KpiPanel({ container: byId("kpis"), caption: byId("kpis-caption") });
+    this.kpis = new KpiPanel({ container: byId("kpis"), caption: byId("kpis-caption"), names: this.names });
     this.timeline = new TimelineChart({
       container: byId("timeline"), legend: byId("timeline-legend"), hint: byId("timeline-hint"),
       colors: this.colors, tooltip: this.tooltip, onFocus,
@@ -1036,13 +1152,15 @@ class Dashboard {
     this.donut = new DonutChart({ container: byId("donut"), colors: this.colors, onFocus });
     this.models = new ModelsTable({ container: byId("models"), coverage: byId("coverage"), colors: this.colors, onFocus });
     this.live = new LiveModelsPanel({ container: byId("live"), hint: byId("live-hint"), colors: this.colors });
-    this.insights = new InsightsPanel(byId("insights"));
+    this.insights = new InsightsPanel({ container: byId("insights"), names: this.names });
     this.loads = new LoadsTable({ container: byId("loads"), colors: this.colors });
     this.hourly = new HourlyProfileChart({ container: byId("hourly"), tooltip: this.tooltip });
-    this.clients = new ClientsTable({ container: byId("clients"), colors: this.colors });
+    this.clients = new ClientsTable({
+      container: byId("clients"), colors: this.colors, names: this.names, onRename: (ip, name) => this.renameClient(ip, name),
+    });
     this.endpoints = new EndpointsTable(byId("endpoints"));
-    this.recent = new RecentRequestsTable({ container: byId("recent"), hint: byId("recent-hint"), colors: this.colors });
-    this.problems = new ProblemsPanel(byId("problems"));
+    this.recent = new RecentRequestsTable({ container: byId("recent"), hint: byId("recent-hint"), colors: this.colors, names: this.names });
+    this.problems = new ProblemsPanel({ container: byId("problems"), names: this.names });
 
     this.refreshButton = byId("refresh-button");
     this.autoRefresh = byId("auto-refresh");
@@ -1060,6 +1178,19 @@ class Dashboard {
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.focus) this.setFocus(this.focus);
     });
+    document.addEventListener("mouseover", (event) => {
+      const alias = event.target.closest("[data-client-ip]");
+      if (alias) this.tooltip.showAbove(`<span class="mono">${escapeHtml(alias.dataset.clientIp)}</span>`, alias);
+    });
+    document.addEventListener("mouseout", (event) => {
+      const alias = event.target.closest("[data-client-ip]");
+      if (alias && !alias.contains(event.relatedTarget)) this.tooltip.hide();
+    });
+  }
+
+  async renameClient(ip, name) {
+    this.names.update(await this.api.saveAlias(ip, name));
+    this.#render();
   }
 
   static #queryFromHash() {
@@ -1086,7 +1217,9 @@ class Dashboard {
     this.period.render(this.query, this.status?.now?.slice(0, 10));
     let error = null;
     try {
-      [this.report, this.status] = await Promise.all([this.api.report(this.query), this.api.status()]);
+      let aliases;
+      [this.report, this.status, aliases] = await Promise.all([this.api.report(this.query), this.api.status(), this.api.aliases()]);
+      this.names.update(aliases);
       if (this.focus && !this.report.models.some((m) => m.model === this.focus)) this.focus = null;
     } catch (caught) {
       error = caught;
