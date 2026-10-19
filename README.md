@@ -32,6 +32,14 @@ docker compose up -d --build
 | `OLLAMA_SERVER_TZ` | `UTC` | часовой пояс внутри контейнера ollama |
 | `WATCHDOG_PUBLISH` | `8080` | порт на хосте |
 | `WATCHDOG_USERNAME` / `WATCHDOG_PASSWORD` | пусто | Basic Auth; задайте, если порт виден не только вам |
+| `WATCHDOG_CLIENT_ALIASES` | пусто | имена клиентов: `192.168.1.10=Ноутбук, 10.0.0.5=Open WebUI` |
+
+### Имена клиентов
+
+Вместо IP-адресов дашборд может показывать понятные имена, а сам IP — в подсказке
+при наведении. Имя задаётся кнопкой ✎ в таблице «Клиенты» (пустое значение — сбросить)
+и хранится в volume, в `/data/client-aliases.json`. Имена из `WATCHDOG_CLIENT_ALIASES`
+в дашборде не редактируются.
 
 Если порт ollama не опубликован на хосте, а она живёт в своей compose-сети, подключите
 watchdog к этой сети и укажите `OLLAMA_URL=http://ollama:11434`:

@@ -28,6 +28,7 @@ services:
       WATCHDOG_RETENTION_DAYS: ${WATCHDOG_RETENTION_DAYS:-90}
       WATCHDOG_USERNAME: ${WATCHDOG_USERNAME:-}
       WATCHDOG_PASSWORD: ${WATCHDOG_PASSWORD:-}
+      WATCHDOG_CLIENT_ALIASES: ${WATCHDOG_CLIENT_ALIASES:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
