@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ollama Watchdog</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237c5cff'/%3E%3Cpath d='M6 18h5l3-8 4 14 3-6h5' stroke='white' stroke-width='2.5' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand__logo">
+        <svg viewBox="0 0 32 32" aria-hidden="true"><path d="M6 18h5l3-8 4 14 3-6h5"/></svg>
+      </div>
+      <div>
+        <h1>Ollama Watchdog</h1>
+        <p class="brand__subtitle" id="subtitle">Загрузка…</p>
+      </div>
+    </div>
+    <div class="status-pills" id="status-pills"></div>
+  </header>
+
+  <nav class="toolbar">
+    <div class="segmented" id="period-buttons">
+      <button data-period="today">Сегодня</button>
+      <button data-period="yesterday">Вчера</button>
+      <button data-period="hours" data-hours="24">24 часа</button>
+      <button data-period="hours" data-hours="168">7 дней</button>
+      <button data-period="hours" data-hours="720">30 дней</button>
+      <button data-period="all">Всё время</button>
+    </div>
+    <label class="date-field" title="Выбрать день">
+      <span>День</span>
+      <input type="date" id="date-input">
+    </label>
+    <div class="toolbar__spacer"></div>
+    <label class="switch">
+      <input type="checkbox" id="auto-refresh" checked>
+      <span class="switch__track"></span>
+      <span>Автообновление</span>
+    </label>
+    <button class="icon-button" id="refresh-button" title="Обновить сейчас" aria-label="Обновить">
+      <svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.34-5.66M20 4v5h-5"/></svg>
+    </button>
+  </nav>
+
+  <main class="layout">
+    <div id="notices"></div>
+
+    <section>
+      <p class="kpis-caption" id="kpis-caption"></p>
+      <div class="kpis" id="kpis"></div>
+    </section>
+
+    <section class="grid grid--wide-left">
+      <article class="card">
+        <header class="card__header">
+          <div>
+            <h2>Запросы к моделям</h2>
+            <p class="card__hint" id="timeline-hint"></p>
+          </div>
+          <div class="legend" id="timeline-legend"></div>
+        </header>
+        <div class="chart" id="timeline"></div>
+      </article>
+      <article class="card">
+        <header class="card__header"><h2>Доля моделей</h2></header>
+        <div id="donut"></div>
+      </article>
+    </section>
+
+    <section class="card">
+      <header class="card__header">
+        <div>
+          <h2>Модели</h2>
+          <p class="card__hint">Нажмите на модель, чтобы выделить её на графиках и в ленте запросов</p>
+        </div>
+        <div id="coverage"></div>
+      </header>
+      <div class="table-wrap" id="models"></div>
+    </section>
+
+    <section class="grid grid--halves">
+      <article class="card">
+        <header class="card__header">
+          <div>
+            <h2>Сейчас в памяти</h2>
+            <p class="card__hint" id="live-hint"></p>
+          </div>
+        </header>
+        <div id="live"></div>
+      </article>
+      <article class="card">
+        <header class="card__header"><h2>Наблюдения</h2></header>
+        <div id="insights"></div>
+      </article>
+    </section>
+
+    <section class="grid grid--halves">
+      <article class="card">
+        <header class="card__header">
+          <div>
+            <h2>Загрузки моделей в память</h2>
+            <p class="card__hint">Частые загрузки — признак того, что модели вытесняют друг друга</p>
+          </div>
+        </header>
+        <div class="table-wrap" id="loads"></div>
+      </article>
+      <article class="card">
+        <header class="card__header">
+          <div>
+            <h2>Профиль нагрузки по часам</h2>
+            <p class="card__hint">Сколько запросов приходится на каждый час суток</p>
+          </div>
+        </header>
+        <div class="chart chart--small" id="hourly"></div>
+      </article>
+    </section>
+
+    <section class="grid grid--halves">
+      <article class="card">
+        <header class="card__header"><h2>Клиенты</h2></header>
+        <div class="table-wrap" id="clients"></div>
+      </article>
+      <article class="card">
+        <header class="card__header"><h2>Эндпоинты</h2></header>
+        <div class="table-wrap" id="endpoints"></div>
+      </article>
+    </section>
+
+    <section class="grid grid--wide-left">
+      <article class="card">
+        <header class="card__header">
+          <div>
+            <h2>Последние запросы</h2>
+            <p class="card__hint" id="recent-hint"></p>
+          </div>
+        </header>
+        <div class="table-wrap table-wrap--scroll" id="recent"></div>
+      </article>
+      <article class="card">
+        <header class="card__header"><h2>Проблемы</h2></header>
+        <div id="problems"></div>
+      </article>
+    </section>
+  </main>
+
+  <footer class="footer" id="footer"></footer>
+  <div class="tooltip" id="tooltip" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
