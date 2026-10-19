@@ -9,7 +9,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, tzinfo
 from enum import Enum
 
-from .statistics import UNKNOWN_MODEL, Report
+from .statistics import Report
 
 
 class Style:
@@ -148,29 +148,34 @@ class ConsoleReportRenderer:
             ["Модель", "Запросов", "Доля", "Ошибок", "Клиентов", "Среднее", "p95", "Макс", "Эндпоинты"],
             "<>>>>>>><",
         )
+        coverage = report.coverage
+        attributed = report.inference_requests - coverage.unknown
         for usage in report.models:
-            marker = "" if usage.model == UNKNOWN_MODEL or usage.exact == usage.requests else " ≈"
+            marker = "" if usage.exact == usage.requests else " ≈"
             endpoints = ", ".join(f"{path} {count}" for path, count in usage.endpoints.items())
             table.add_row(
                 usage.model + marker,
                 Format.number(usage.requests),
-                Format.percent(usage.requests, report.inference_requests),
+                Format.percent(usage.requests, attributed),
                 Format.number(usage.errors),
                 usage.clients,
                 Format.duration(usage.latency.average),
                 Format.duration(usage.latency.p95),
                 Format.duration(usage.latency.maximum),
                 endpoints,
-                style=self._style.dim if usage.model == UNKNOWN_MODEL else None,
             )
-        coverage = report.coverage
         total = report.inference_requests
         legend = (
             f"  Привязка к модели: точно {Format.percent(coverage.exact, total)}, "
-            f"приблизительно {Format.percent(coverage.approximate, total)}, "
-            f"не определена {Format.percent(coverage.unknown, total)}.  «≈» — есть приблизительные."
+            f"приблизительно {Format.percent(coverage.approximate, total)}.  «≈» — есть приблизительные."
         )
-        return [self._title("Запросы по моделям"), *table.render(self._style), self._style.dim(legend)]
+        lines = [self._title("Запросы по моделям"), *table.render(self._style), self._style.dim(legend)]
+        if coverage.unknown:
+            lines.append(self._style.yellow(
+                f"  ⚠ Модель не определена у {Format.number(coverage.unknown)} запросов "
+                f"({Format.percent(coverage.unknown, total)}) — в таблицу и доли они не входят."
+            ))
+        return lines
 
     def _hourly(self, report: Report) -> list[str]:
         peak = max(report.hourly, default=0)

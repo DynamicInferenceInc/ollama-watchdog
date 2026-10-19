@@ -178,6 +178,7 @@ class Report:
     coverage: AttributionCoverage
     failed_requests: list[RequestRecord]
     recent_requests: list[RequestRecord]
+    unattributed_requests: list[RequestRecord]
     incidents: list[Incident]
     server_starts: list[datetime]
     debug_logging_detected: bool
@@ -193,6 +194,8 @@ class ReportBuilder:
     def build(self, result: AnalysisResult, period: ReportPeriod) -> Report:
         requests = [r for r in result.requests if period.contains(r.timestamp)]
         inference = [r for r in requests if r.is_inference]
+        attributed = [r for r in inference if r.model]
+        unattributed = [r for r in inference if not r.model]
         timestamps = [r.timestamp for r in requests]
         timeline_step = "hour" if period.length <= self.HOURLY_TIMELINE_LIMIT else "day"
 
@@ -207,7 +210,7 @@ class ReportBuilder:
             inference_errors=sum(r.is_error for r in inference),
             active_clients=len({r.client_ip for r in inference}),
             latency=LatencyStats.of(r.duration for r in inference),
-            models=self._models(inference),
+            models=self._models(attributed),
             endpoints=self._endpoints(requests),
             clients=self._clients(requests),
             hourly=self._hourly(inference),
@@ -219,6 +222,7 @@ class ReportBuilder:
             coverage=self._coverage(inference),
             failed_requests=[self._record(r) for r in inference if r.is_error],
             recent_requests=[self._record(r) for r in inference[-self.RECENT_REQUESTS:]][::-1],
+            unattributed_requests=[self._record(r) for r in unattributed[-self.RECENT_REQUESTS:]][::-1],
             incidents=[i for i in result.incidents if period.contains(i.timestamp)],
             server_starts=[s for s in result.server_starts if period.contains(s)],
             debug_logging_detected=result.debug_logging_detected,
@@ -239,10 +243,11 @@ class ReportBuilder:
             duration=request.duration,
         )
 
-    def _models(self, inference: list[HttpRequest]) -> list[ModelUsage]:
+    @staticmethod
+    def _models(attributed: list[HttpRequest]) -> list[ModelUsage]:
         groups: dict[str, list[HttpRequest]] = defaultdict(list)
-        for request in inference:
-            groups[self._model_of(request)].append(request)
+        for request in attributed:
+            groups[request.model].append(request)
         usages = [
             ModelUsage(
                 model=model,
@@ -256,7 +261,7 @@ class ReportBuilder:
             )
             for model, items in groups.items()
         ]
-        return sorted(usages, key=lambda u: (u.model == UNKNOWN_MODEL, -u.requests))
+        return sorted(usages, key=lambda u: -u.requests)
 
     @staticmethod
     def _endpoints(requests: list[HttpRequest]) -> list[EndpointUsage]:
@@ -320,7 +325,8 @@ class ReportBuilder:
             key = self._bucket_start(request.timestamp, step)
             requests[key] += 1
             errors[key] += request.is_error
-            by_model[key][self._model_of(request)] += 1
+            if request.model:
+                by_model[key][request.model] += 1
 
         return [
             TimelineBucket(start=key, requests=requests[key], errors=errors[key], by_model=dict(by_model[key]))
