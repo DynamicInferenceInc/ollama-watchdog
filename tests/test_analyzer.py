@@ -12,11 +12,14 @@ def server_started(clock: str) -> str:
     return f'time=2026-10-15T{clock}.000Z level=INFO source=routes.go:2008 msg="Listening on [::]:11434 (version 0.32.15)"'
 
 
-def model_loaded(clock: str, blob: str, name: str, embedding: bool = False, runners: int = 1) -> list[str]:
+def model_loaded(
+    clock: str, blob: str, name: str, embedding: bool = False, runners: int = 1, context: int = 8192
+) -> list[str]:
     flags = " --embedding" if embedding else ""
     return [
         f'time=2026-10-15T{clock}.000Z level=INFO source=llama_server.go:433 msg="starting llama-server" '
         f'cmd="/usr/lib/ollama/llama-server --model {blob} --port 1{flags} -ngl 99"',
+        f"srv    load_model: initializing, n_slots = 1, n_ctx_slot = {context}, kv_unified = 'false'",
         f'time=2026-10-15T{clock}.100Z level=INFO source=llama_server.go:1362 msg="llama-server started in 2.29 seconds"',
         f'time=2026-10-15T{clock}.200Z level=INFO source=images.go:381 msg="template selection" '
         f"model=registry.ollama.ai/library/{name} selected=go_template",
@@ -26,6 +29,14 @@ def model_loaded(clock: str, blob: str, name: str, embedding: bool = False, runn
 
 def request(clock: str, path: str, status: int = 200) -> str:
     return f'[GIN] 2026/10/15 - {clock} | {status} |  1.5s |  10.0.0.1 | POST     "{path}"'
+
+
+def task(task_id: int, context: int, embedding: bool = False, released: bool = True) -> list[str]:
+    keep = 0 if embedding else 4
+    lines = [f"slot   operator(): id  0 | task {task_id} | new prompt, n_ctx_slot = {context}, n_keep = {keep}, task.n_tokens = 10"]
+    if released:
+        lines.append(f"slot      release: id  0 | task {task_id} | stop processing: n_tokens = 20, truncated = 0")
+    return lines
 
 
 def finished(clock: str, blob: str | None = None, name: str | None = None) -> str:
@@ -76,6 +87,47 @@ class HeuristicAttributionTest(unittest.TestCase):
         ]
         result = OllamaLogAnalyzer().analyze(lines)
         self.assertEqual([r.model for r in result.requests], ["qwen3:4b", "qwen3.8:27b", "qwen3.8:27b"])
+
+
+class RunnerTaskAttributionTest(unittest.TestCase):
+    def setUp(self):
+        self.loaded = [
+            server_started("10:00:00"),
+            *model_loaded("10:00:01", EMBED_BLOB, "qwen3-embedding:8b", embedding=True, context=2048),
+            *model_loaded("10:00:02", OTHER_CHAT_BLOB, "reranker", runners=2, context=2048),
+            *model_loaded("10:00:03", CHAT_BLOB, "qwen3.8:27b", runners=3, context=65536),
+        ]
+
+    def test_tasks_resolve_several_generation_models(self):
+        lines = [
+            *self.loaded,
+            *task(1, 65536),
+            request("10:00:10", "/api/chat"),
+            *task(2, 2048),
+            request("10:00:11", "/api/chat"),
+            *task(3, 2048, embedding=True),
+            *task(4, 2048, embedding=True),
+            request("10:00:12", "/api/embed"),
+            *task(5, 65536),
+            request("10:00:13", "/v1/chat/completions"),
+        ]
+        result = OllamaLogAnalyzer().analyze(lines)
+        self.assertEqual(
+            [r.model for r in result.requests],
+            ["qwen3.8:27b", "reranker", "qwen3-embedding:8b", "qwen3.8:27b"],
+        )
+
+    def test_unreleased_task_of_aborted_stream(self):
+        lines = [
+            *self.loaded,
+            *task(1, 2048, embedding=True),
+            request("10:00:10", "/api/embed"),
+            *task(2, 2048, embedding=True),
+            *task(3, 65536, released=False),
+            request("10:00:15", "/api/chat"),
+        ]
+        result = OllamaLogAnalyzer().analyze(lines)
+        self.assertEqual([r.model for r in result.requests], ["qwen3-embedding:8b", "qwen3.8:27b"])
 
 
 class DebugAttributionTest(unittest.TestCase):

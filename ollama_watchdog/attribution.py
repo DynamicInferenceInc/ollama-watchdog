@@ -40,6 +40,7 @@ class Runner:
     is_embedding: bool
     name: str | None = None
     last_used: datetime | None = None
+    context_size: int | None = None
 
     @property
     def serves(self) -> EndpointKind:
@@ -51,12 +52,17 @@ class RunnerRegistry:
 
     def __init__(self) -> None:
         self._runners: dict[str, Runner] = {}
+        self._evicted: dict[str, Runner] = {}
         self._starting: Runner | None = None
         self._names_by_blob: dict[str, str] = {}
         self.last_loaded: Runner | None = None
 
     def on_runner_starting(self, blob: str, is_embedding: bool) -> None:
         self._starting = Runner(blob=blob, is_embedding=is_embedding)
+
+    def on_slot_context(self, context_size: int) -> None:
+        if self._starting is not None:
+            self._starting.context_size = context_size
 
     def on_model_loaded(self, full_name: str, timestamp: datetime) -> Runner | None:
         runner = self._starting
@@ -66,6 +72,7 @@ class RunnerRegistry:
         runner.name = ModelNames.short(full_name)
         runner.last_used = timestamp
         self._runners[runner.blob] = runner
+        self._evicted.pop(runner.blob, None)
         self._names_by_blob[runner.blob] = runner.name
         self.last_loaded = runner
         return runner
@@ -78,11 +85,36 @@ class RunnerRegistry:
                 key=lambda r: r.last_used or datetime.min,
             )
             del self._runners[evicted.blob]
+            self._evicted[evicted.blob] = evicted
 
     def on_server_restart(self) -> None:
         self._runners.clear()
+        self._evicted.clear()
         self._starting = None
         self.last_loaded = None
+
+    def runner_for_context(self, context_size: int, kind: EndpointKind) -> Runner | None:
+        """Раннер нужного типа с таким размером контекста, если он единственный.
+
+        Выгрузку моделей ollama не логирует, поэтому LRU-догадка в `on_loaded_count`
+        может ошибиться; если задача пришла от «выгруженного» раннера — возвращаем его.
+        """
+
+        def matches(runner: Runner) -> bool:
+            return runner.context_size == context_size and runner.serves is kind
+
+        loaded = [r for r in self._runners.values() if matches(r)]
+        if len(loaded) == 1:
+            return loaded[0]
+        if loaded:
+            return None
+        evicted = [r for r in self._evicted.values() if matches(r)]
+        if len(evicted) != 1:
+            return None
+        runner = evicted[0]
+        del self._evicted[runner.blob]
+        self._runners[runner.blob] = runner
+        return runner
 
     def name_for(self, model_path: str) -> str | None:
         return self._names_by_blob.get(ModelNames.blob_of(model_path))
@@ -94,9 +126,61 @@ class RunnerRegistry:
         return [r for r in self._runners.values() if r.serves is kind]
 
 
-class HeuristicAttributor:
+@dataclass
+class RunnerTask:
+    task_id: int
+    context_size: int
+    kind: EndpointKind
+    finished: bool = False
+
+
+class TaskTracker:
+    """Связывает задачи llama-server с моделями по размеру контекста слота.
+
+    Каждый запрос к модели — это задача её llama-server: `new prompt, n_ctx_slot = N`
+    в начале и `release … stop processing` в конце, сразу перед строкой `[GIN]`.
+    У разных моделей обычно разный n_ctx, поэтому по нему видно, какая модель отвечала.
+    """
+
+    MAX_TRACKED = 200
+
     def __init__(self, registry: RunnerRegistry) -> None:
         self._registry = registry
+        self._tasks: deque[RunnerTask] = deque(maxlen=self.MAX_TRACKED)
+
+    def on_task_started(self, task_id: int, context_size: int, kind: EndpointKind) -> None:
+        self._tasks.append(RunnerTask(task_id, context_size, kind))
+
+    def on_task_released(self, task_id: int) -> None:
+        for task in reversed(self._tasks):
+            if task.task_id == task_id and not task.finished:
+                task.finished = True
+                return
+
+    def claim(self, kind: EndpointKind, include_unfinished: bool = False) -> Runner | None:
+        """Модель последней завершившейся задачи нужного типа, ещё не привязанной к запросу.
+
+        Тип задачи (чат или эмбеддинг) помогает, когда у моделей разных типов
+        совпадает размер контекста. Незавершённые задачи нужны, когда клиент
+        отключился или истёк таймаут: тогда llama-server не пишет `release`.
+        """
+        for task in reversed(self._tasks):
+            if task.kind is not kind or not (task.finished or include_unfinished):
+                continue
+            runner = self._registry.runner_for_context(task.context_size, kind)
+            if runner is not None:
+                self._tasks.remove(task)
+                return runner
+        return None
+
+    def reset(self) -> None:
+        self._tasks.clear()
+
+
+class HeuristicAttributor:
+    def __init__(self, registry: RunnerRegistry, tasks: TaskTracker) -> None:
+        self._registry = registry
+        self._tasks = tasks
         self._awaiting_trigger: dict[EndpointKind, Runner] = {}
 
     def on_model_loaded(self, runner: Runner) -> None:
@@ -104,16 +188,26 @@ class HeuristicAttributor:
 
     def on_server_restart(self) -> None:
         self._awaiting_trigger.clear()
+        self._tasks.reset()
 
     def attribute(self, request: HttpRequest) -> None:
-        runner = self._awaiting_trigger.pop(request.kind, None)
-        if runner is None:
-            candidates = self._registry.candidates_for(request.kind)
-            if len(candidates) == 1:
-                runner = candidates[0]
+        runner = self._runner_for(request)
         if runner is not None and runner.name is not None:
             request.attribute_to(runner.name, Attribution.APPROXIMATE)
             runner.last_used = request.timestamp
+
+    def _runner_for(self, request: HttpRequest) -> Runner | None:
+        kind = request.kind
+        runner = self._tasks.claim(kind) or self._tasks.claim(kind, include_unfinished=True)
+        if runner is not None:
+            if self._awaiting_trigger.get(kind) is runner:
+                del self._awaiting_trigger[kind]
+            return runner
+        runner = self._awaiting_trigger.pop(kind, None)
+        if runner is not None:
+            return runner
+        candidates = self._registry.candidates_for(kind)
+        return candidates[0] if len(candidates) == 1 else None
 
 
 @dataclass(frozen=True)

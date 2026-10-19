@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 
-from .domain import HttpRequest
+from .domain import EndpointKind, HttpRequest
 
 
 class GoDurationParser:
@@ -135,6 +135,56 @@ class TimingLineParser:
             return None
         stage = "prompt" if match["stage"] == "prompt eval" else "generation"
         return TimingRecord(stage=stage, milliseconds=float(match["ms"]), tokens=int(match["tokens"]))
+
+
+@dataclass(frozen=True)
+class SlotContextRecord:
+    """llama-server при старте сообщает размер контекста слота — по нему узнаётся модель."""
+
+    context_size: int
+
+
+@dataclass(frozen=True)
+class TaskStartedRecord:
+    task_id: int
+    context_size: int
+    kind: EndpointKind
+
+    @staticmethod
+    def kind_from_keep(n_keep: int) -> EndpointKind:
+        """Ollama запускает генеративные модели с `--keep 4`; у эмбеддингов llama-server пишет n_keep = 0."""
+        return EndpointKind.EMBEDDING if n_keep == 0 else EndpointKind.GENERATION
+
+
+@dataclass(frozen=True)
+class TaskReleasedRecord:
+    task_id: int
+
+
+RunnerRecord = SlotContextRecord | TaskStartedRecord | TaskReleasedRecord
+
+
+class RunnerLineParser:
+    """Строки llama-server о жизненном цикле задач (одна задача — один запрос к модели)."""
+
+    _SLOT_CONTEXT = re.compile(r"load_model: initializing, n_slots = \d+, n_ctx_slot = (?P<ctx>\d+)")
+    _TASK_STARTED = re.compile(
+        r"\| task (?P<task>\d+) \| new prompt, n_ctx_slot = (?P<ctx>\d+), n_keep = (?P<keep>\d+)"
+    )
+    _TASK_RELEASED = re.compile(r"release: +id +\d+ \| task (?P<task>\d+) \| stop processing")
+
+    MARKERS = ("load_model: initializing", "new prompt, n_ctx_slot", "stop processing")
+
+    def parse(self, line: str) -> RunnerRecord | None:
+        if match := self._TASK_STARTED.search(line):
+            return TaskStartedRecord(
+                int(match["task"]), int(match["ctx"]), TaskStartedRecord.kind_from_keep(int(match["keep"]))
+            )
+        if match := self._TASK_RELEASED.search(line):
+            return TaskReleasedRecord(int(match["task"]))
+        if match := self._SLOT_CONTEXT.search(line):
+            return SlotContextRecord(int(match["ctx"]))
+        return None
 
 
 class LineNormalizer:

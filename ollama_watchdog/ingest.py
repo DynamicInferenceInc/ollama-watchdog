@@ -20,6 +20,7 @@ from pathlib import Path
 
 from .analyzer import AnalysisResult, OllamaLogAnalyzer
 from .docker_api import DockerApiError, DockerClient, DockerTimestamp
+from .parsing import RunnerLineParser
 from .sources import FileLogSource
 
 log = logging.getLogger(__name__)
@@ -33,10 +34,12 @@ class LogArchive:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._writer = None
 
-    @staticmethod
-    def is_worth_keeping(line: str) -> bool:
+    _MARKERS = ("print_timing:", *RunnerLineParser.MARKERS)
+
+    @classmethod
+    def is_worth_keeping(cls, line: str) -> bool:
         _, _, message = line.partition(" ")
-        return message.startswith(("[GIN]", "time=")) or "print_timing:" in message
+        return message.startswith(("[GIN]", "time=")) or any(marker in message for marker in cls._MARKERS)
 
     def replay(self) -> Iterator[str]:
         if not self._path.exists():

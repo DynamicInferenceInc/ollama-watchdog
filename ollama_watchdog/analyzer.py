@@ -12,13 +12,19 @@ from .attribution import (
     HeuristicAttributor,
     ModelNames,
     RunnerRegistry,
+    TaskTracker,
 )
 from .domain import GenerationTiming, HttpRequest, Incident, ModelLoad
 from .parsing import (
     GinLineParser,
     LineNormalizer,
+    RunnerLineParser,
+    RunnerRecord,
     SlogLineParser,
     SlogRecord,
+    SlotContextRecord,
+    TaskReleasedRecord,
+    TaskStartedRecord,
     TimingLineParser,
     TimingRecord,
 )
@@ -48,9 +54,11 @@ class OllamaLogAnalyzer:
         self._gin_parser = GinLineParser(server_timezone)
         self._slog_parser = SlogLineParser()
         self._timing_parser = TimingLineParser()
+        self._runner_parser = RunnerLineParser()
 
         self._registry = RunnerRegistry()
-        self._heuristics = HeuristicAttributor(self._registry)
+        self._tasks = TaskTracker(self._registry)
+        self._heuristics = HeuristicAttributor(self._registry, self._tasks)
         self._debug_matcher = DebugRequestMatcher()
 
         self._result = AnalysisResult()
@@ -85,10 +93,19 @@ class OllamaLogAnalyzer:
             record = self._slog_parser.parse(line)
             if record is not None:
                 self._on_slog_record(record)
-        else:
-            timing = self._timing_parser.parse(line)
-            if timing is not None:
-                self._on_timing(timing)
+        elif (timing := self._timing_parser.parse(line)) is not None:
+            self._on_timing(timing)
+        elif (runner_record := self._runner_parser.parse(line)) is not None:
+            self._on_runner_record(runner_record)
+
+    def _on_runner_record(self, record: RunnerRecord) -> None:
+        match record:
+            case SlotContextRecord(context_size=size):
+                self._registry.on_slot_context(size)
+            case TaskStartedRecord(task_id=task_id, context_size=size, kind=kind):
+                self._tasks.on_task_started(task_id, size, kind)
+            case TaskReleasedRecord(task_id=task_id):
+                self._tasks.on_task_released(task_id)
 
     def _on_http_request(self, request: HttpRequest) -> None:
         self._last_timestamp = request.timestamp
