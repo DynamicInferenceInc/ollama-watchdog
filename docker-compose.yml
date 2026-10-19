@@ -1,0 +1,45 @@
+services:
+  # Watchdog не получает docker.sock напрямую: прокси пропускает только чтение
+  # информации о контейнерах и их логов, всё остальное (запуск, удаление, exec) запрещено.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    environment:
+      CONTAINERS: 1
+      POST: 0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-api
+    restart: unless-stopped
+
+  watchdog:
+    build: .
+    image: ollama-watchdog:latest
+    depends_on:
+      - docker-proxy
+    ports:
+      - "${WATCHDOG_PUBLISH:-8080}:8080"
+    environment:
+      DOCKER_HOST: tcp://docker-proxy:2375
+      OLLAMA_CONTAINER: ${OLLAMA_CONTAINER:-ollama}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_SERVER_TZ: ${OLLAMA_SERVER_TZ:-UTC}
+      TZ: ${TZ:-Europe/Moscow}
+      WATCHDOG_RETENTION_DAYS: ${WATCHDOG_RETENTION_DAYS:-90}
+      WATCHDOG_USERNAME: ${WATCHDOG_USERNAME:-}
+      WATCHDOG_PASSWORD: ${WATCHDOG_PASSWORD:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - watchdog-data:/data
+    networks:
+      - docker-api
+      - default
+    restart: unless-stopped
+
+networks:
+  docker-api:
+    internal: true
+
+volumes:
+  watchdog-data:
