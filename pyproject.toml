@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ollama-watchdog"
+version = "0.2.0"
+description = "Статистика запросов к моделям ollama по её логам"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+ollama-watchdog = "ollama_watchdog.cli:main"
+ollama-watchdog-web = "ollama_watchdog.web.app:main"
+
+[tool.setuptools]
+packages = ["ollama_watchdog", "ollama_watchdog.web"]
+
+[tool.setuptools.package-data]
+"ollama_watchdog.web" = ["static/*"]
