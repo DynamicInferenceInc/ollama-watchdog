@@ -468,6 +468,8 @@ tr:hover .client-edit, .client-edit:focus-visible { opacity: 1; }
 
 .badge--good { color: var(--good); background: var(--good-soft); }
 .badge--warn { color: var(--warn); background: var(--warn-soft); }
+.badge--button { border: 0; font-family: inherit; cursor: pointer; }
+.badge--button:hover { filter: brightness(1.2); }
 .badge--bad { color: var(--bad); background: var(--bad-soft); }
 .badge--muted { color: var(--text-muted); background: rgba(255, 255, 255, 0.05); }
 .badge--info { color: var(--info); background: rgba(96, 165, 250, 0.14); }
@@ -526,6 +528,7 @@ tr:hover .client-edit, .client-edit:focus-visible { opacity: 1; }
 
 .problems-section + .problems-section { margin-top: 18px; }
 .problems-section h3 { font-size: 12.5px; font-weight: 600; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.04em; }
+.problems-section__hint { color: var(--text-faint); font-size: 12.5px; margin: -4px 0 8px; }
 .problem-list { display: flex; flex-direction: column; gap: 6px; max-height: 340px; overflow-y: auto; }
 
 .problem {
@@ -579,6 +582,7 @@ tr:hover .client-edit, .client-edit:focus-visible { opacity: 1; }
 .tooltip__title { font-weight: 600; margin-bottom: 6px; }
 .tooltip__row { display: grid; grid-template-columns: 10px minmax(0, 1fr) auto; gap: 8px; align-items: center; color: var(--text-muted); }
 .tooltip__row strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.tooltip__row--warn { color: var(--warn); font-size: 11.5px; }
 .tooltip__total { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; }
 
 .footer {

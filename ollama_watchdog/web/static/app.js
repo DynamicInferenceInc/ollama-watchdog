@@ -81,6 +81,11 @@ function svgElement(width, height, content) {
   return `<svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="img">${content}</svg>`;
 }
 
+/** Запросы, у которых модель известна: от них считаются доли моделей. */
+function attributedRequests(report) {
+  return report.inference_requests - report.coverage.unknown;
+}
+
 function emptyState(text) {
   return `<div class="empty">${escapeHtml(text)}</div>`;
 }
@@ -168,7 +173,6 @@ class ColorRegistry {
   }
 
   colorFor(model) {
-    if (model === UNKNOWN_MODEL) return "#4b5168";
     if (model === OTHER_MODELS) return "#6b7280";
     if (!this.assigned.has(model)) {
       this.assigned.set(model, ColorRegistry.PALETTE[this.assigned.size % ColorRegistry.PALETTE.length]);
@@ -221,16 +225,13 @@ class Tooltip {
   }
 }
 
-/** Набор серий для графиков: топ моделей + «другие» + «не определена». */
+/** Набор серий для графиков: топ моделей + «другие». */
 class ModelSeries {
   constructor(models, limit) {
-    const known = models.filter((m) => m.model !== UNKNOWN_MODEL);
-    this.top = known.slice(0, limit).map((m) => m.model);
-    this.hasOther = known.length > limit;
-    this.hasUnknown = models.some((m) => m.model === UNKNOWN_MODEL);
+    this.top = models.slice(0, limit).map((m) => m.model);
+    this.hasOther = models.length > limit;
     this.names = [...this.top];
     if (this.hasOther) this.names.push(OTHER_MODELS);
-    if (this.hasUnknown) this.names.push(UNKNOWN_MODEL);
   }
 
   /** Распределяет словарь {модель: число} по сериям. */
@@ -367,9 +368,13 @@ class TimelineChart {
       .sort((a, b) => b[1] - a[1])
       .map(([model, count]) => `<div class="tooltip__row">${this.colors.swatch(model)}<span>${escapeHtml(model)}</span><strong>${Format.number(count)}</strong></div>`)
       .join("");
+    const unattributed = bucket.requests - Object.values(bucket.by_model).reduce((sum, count) => sum + count, 0);
+    const unattributedRow = unattributed
+      ? `<div class="tooltip__row tooltip__row--warn"><span>⚠</span><span>модель не определена</span><strong>${Format.number(unattributed)}</strong></div>`
+      : "";
     const errors = bucket.errors ? `<span class="text-bad">ошибок: ${Format.number(bucket.errors)}</span>` : "";
     this.tooltip.show(
-      `<div class="tooltip__title">${title}</div>${rows || '<div class="muted">запросов нет</div>'}
+      `<div class="tooltip__title">${title}</div>${rows + unattributedRow || '<div class="muted">запросов нет</div>'}
        <div class="tooltip__total"><span>Всего: <strong>${Format.number(bucket.requests)}</strong></span>${errors}</div>`,
       event,
     );
@@ -389,7 +394,7 @@ class DonutChart {
   }
 
   render(report, focus) {
-    const total = report.inference_requests;
+    const total = attributedRequests(report);
     if (!total) {
       this.container.innerHTML = emptyState("Нет данных");
       return;
@@ -597,7 +602,7 @@ class ModelsTable {
         <td><div class="share">
           <span class="num"><strong>${Format.number(usage.requests)}</strong></span>
           <div class="share__bar"><div class="share__fill" style="width:${(usage.requests / maxRequests) * 100}%;background:${this.colors.colorFor(usage.model)}"></div></div>
-          <span class="share__value">${Format.percent(usage.requests, report.inference_requests)}</span>
+          <span class="share__value">${Format.percent(usage.requests, attributedRequests(report))}</span>
         </div></td>
         <td class="num ${usage.errors ? (errorRate > 0.05 ? "text-bad" : "text-warn") : "faint"}">
           ${Format.number(usage.errors)}${usage.errors ? ` <span class="faint">(${Format.percent(usage.errors, usage.requests)})</span>` : ""}</td>
@@ -616,9 +621,6 @@ class ModelsTable {
   }
 
   #attributionBadge(usage) {
-    if (usage.model === UNKNOWN_MODEL) {
-      return `<span class="badge badge--muted" title="Из обычного лога ollama нельзя понять, к какой модели был запрос">?</span>`;
-    }
     if (usage.exact === usage.requests) return `<span class="badge badge--good" title="Модель определена точно">точно</span>`;
     return `<span class="badge badge--info" title="Модель определена по косвенным признакам">≈ оценка</span>`;
   }
@@ -630,10 +632,13 @@ class ModelsTable {
       this.coverage.innerHTML = "";
       return;
     }
+    const unknownChip = unknown
+      ? `<button class="badge badge--warn badge--button" data-scroll-to="problems"
+          title="В таблицу и доли не входят; список — в блоке «Проблемы»">⚠ без модели: ${Format.number(unknown)}</button>`
+      : "";
     this.coverage.innerHTML = `<div class="chips" title="Насколько точно запросы привязаны к моделям">
       <span class="badge badge--good">точно ${Format.percent(exact, total)}</span>
-      <span class="badge badge--info">≈ ${Format.percent(approximate, total)}</span>
-      <span class="badge badge--muted">? ${Format.percent(unknown, total)}</span></div>`;
+      <span class="badge badge--info">≈ ${Format.percent(approximate, total)}</span>${unknownChip}</div>`;
   }
 }
 
@@ -822,7 +827,9 @@ class RecentRequestsTable {
       return `<tr>
         <td class="mono nowrap" title="${escapeHtml(request.timestamp)}">${Format.dateTime(request.timestamp)}:${request.timestamp.slice(17, 19)}</td>
         <td><span class="badge badge--${statusTone}">${request.status}</span></td>
-        <td><div class="model-name">${this.colors.swatch(request.model)}<span class="model-name__text">${escapeHtml(request.model)}</span></div></td>
+        <td>${request.model === UNKNOWN_MODEL
+          ? '<span class="badge badge--warn" title="По логу не удалось понять, к какой модели был запрос">⚠ модель не определена</span>'
+          : `<div class="model-name">${this.colors.swatch(request.model)}<span class="model-name__text">${escapeHtml(request.model)}</span></div>`}</td>
         <td><span class="chip">${escapeHtml(request.endpoint)}</span></td>
         <td class="muted nowrap">${this.names.label(request.client_ip)}</td>
         <td class="num">${Format.duration(request.duration)}</td>
@@ -840,20 +847,31 @@ class ProblemsPanel {
 
   render(report) {
     const failed = [...report.failed_requests].reverse().slice(0, 30);
+    const unattributed = report.unattributed_requests.slice(0, 30);
     const incidents = this.#groupIncidents(report.incidents);
-    if (!failed.length && !incidents.length) {
+    if (!failed.length && !unattributed.length && !incidents.length) {
       this.container.innerHTML = emptyState("Проблем не обнаружено 🎉");
       return;
     }
     const failedHtml = failed.map((f) => `<div class="problem ${f.status >= 500 ? "problem--bad" : ""}">
       <div class="problem__head"><span>${Format.dateTime(f.timestamp)} · ${this.names.label(f.client_ip)}</span><span>${Format.duration(f.duration)}</span></div>
       <div class="problem__text"><strong>${f.status}</strong> ${escapeHtml(f.endpoint)} → ${escapeHtml(f.model)}</div></div>`).join("");
+    const unattributedHtml = unattributed.map((u) => `<div class="problem">
+      <div class="problem__head"><span>${Format.dateTime(u.timestamp)} · ${this.names.label(u.client_ip)}</span><span>${Format.duration(u.duration)}</span></div>
+      <div class="problem__text"><strong>${u.status}</strong> ${escapeHtml(u.endpoint)}</div></div>`).join("");
+    const unattributedSection = unattributed.length
+      ? `<div class="problems-section"><h3>Модель не определена · ${report.coverage.unknown}</h3>
+          <p class="problems-section__hint">По логу не удалось понять, к какой модели были эти запросы, поэтому в статистику по моделям они не входят.
+          Обычно это сорвавшиеся запросы, которые не дошли до модели, или пустые «прогревы» /api/generate.</p>
+          <div class="problem-list">${unattributedHtml}</div></div>`
+      : "";
     const incidentsHtml = incidents.map((i) => `<div class="problem ${i.level === "ERROR" ? "problem--bad" : ""}">
       <div class="problem__head"><span>${i.level} · ×${i.count}</span><span>последний раз ${Format.dateTime(i.last)}</span></div>
       <div class="problem__text" title="${escapeHtml(i.details)}">${escapeHtml(i.message)}</div></div>`).join("");
     this.container.innerHTML = `
       ${failed.length ? `<div class="problems-section"><h3>Неудачные запросы · ${report.failed_requests.length}</h3><div class="problem-list">${failedHtml}</div></div>` : ""}
-      ${incidents.length ? `<div class="problems-section"><h3>Сообщения сервера</h3><div class="problem-list">${incidentsHtml}</div></div>` : ""}`;
+      ${incidents.length ? `<div class="problems-section"><h3>Сообщения сервера</h3><div class="problem-list">${incidentsHtml}</div></div>` : ""}
+      ${unattributedSection}`;
   }
 
   #groupIncidents(incidents) {
@@ -901,12 +919,12 @@ class InsightsBuilder {
   }
 
   #busiest(report) {
-    const top = report.models.find((m) => m.model !== UNKNOWN_MODEL);
+    const top = report.models[0];
     if (!top) return [];
     return [{
       level: "info",
       title: `Основная нагрузка — ${top.model}`,
-      text: `${Format.number(top.requests)} ${Format.plural(top.requests, "запрос", "запроса", "запросов")} (${Format.percent(top.requests, report.inference_requests)} всех), медиана ответа ${Format.duration(top.latency.median)}.`,
+      text: `${Format.number(top.requests)} ${Format.plural(top.requests, "запрос", "запроса", "запросов")} (${Format.percent(top.requests, attributedRequests(report))} всех), медиана ответа ${Format.duration(top.latency.median)}.`,
     }];
   }
 
@@ -934,7 +952,7 @@ class InsightsBuilder {
       });
     }
     report.models
-      .filter((m) => m.errors >= 2 && m.errors / m.requests >= 0.05 && m.model !== UNKNOWN_MODEL)
+      .filter((m) => m.errors >= 2 && m.errors / m.requests >= 0.05)
       .slice(0, 2)
       .forEach((m) => result.push({
         level: "bad",
@@ -980,7 +998,7 @@ class InsightsBuilder {
 
   #slowModels(report) {
     return report.models
-      .filter((m) => m.model !== UNKNOWN_MODEL && m.requests >= 3 && m.latency.p95 >= 60)
+      .filter((m) => m.requests >= 3 && m.latency.p95 >= 60)
       .slice(0, 2)
       .map((m) => ({
         level: "info",
@@ -1082,7 +1100,7 @@ class StatusBar {
     }
     if (report && report.inference_requests && !report.debug_logging_detected && report.coverage.exact < report.inference_requests) {
       notices.push(`<div class="notice">В обычном логе ollama у запроса нет имени модели, поэтому часть запросов привязана к моделям
-        приблизительно (≈) или не определена (?). Для точной статистики запустите контейнер ollama с <code>OLLAMA_DEBUG=1</code>.</div>`);
+        приблизительно (≈). Для точной статистики запустите контейнер ollama с <code>OLLAMA_DEBUG=1</code>.</div>`);
     }
     this.notices.innerHTML = notices.join("");
   }
@@ -1177,6 +1195,10 @@ class Dashboard {
     });
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.focus) this.setFocus(this.focus);
+    });
+    document.addEventListener("click", (event) => {
+      const link = event.target.closest("[data-scroll-to]");
+      if (link) byId(link.dataset.scrollTo).closest(".card").scrollIntoView({ behavior: "smooth", block: "start" });
     });
     document.addEventListener("mouseover", (event) => {
       const alias = event.target.closest("[data-client-ip]");
